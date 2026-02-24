@@ -1,0 +1,36 @@
+name: Enrollment Agent
+
+on:
+  schedule:
+    - cron: "*/2 * * * *"   # runs every 2 minutes
+  workflow_dispatch:
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Install Chrome
+        run: |
+          sudo apt update
+          sudo apt install -y google-chrome-stable
+
+      - name: Run Agent
+        env:
+          COLLEGE_USER: ${{ secrets.COLLEGE_USER }}
+          COLLEGE_PASS: ${{ secrets.COLLEGE_PASS }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+        run: python your_script.py
