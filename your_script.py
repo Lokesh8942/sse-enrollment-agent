@@ -11,9 +11,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select, WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import TimeoutException
 
 load_dotenv()
 
@@ -40,9 +38,7 @@ class EnrollmentAgent:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "r") as f:
                 return json.load(f)
-        return {
-            "known_courses": {}
-        }
+        return {"known_courses": {}}
 
     def save_memory(self):
         with open(DATA_FILE, "w") as f:
@@ -55,10 +51,11 @@ class EnrollmentAgent:
         options.add_argument("--headless=new")
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
+        options.add_argument("--remote-debugging-port=9222")
 
-        service = Service(ChromeDriverManager().install())
-        return webdriver.Chrome(service=service, options=options)
+        return webdriver.Chrome(options=options)
 
     # ---------------- OBSERVE ----------------
 
@@ -71,7 +68,13 @@ class EnrollmentAgent:
             print("Opening login page...")
             driver.get(LOGIN_URL)
 
-            WebDriverWait(driver, 15).until(
+            time.sleep(5)
+
+            print("Current URL:", driver.current_url)
+            print("Page title:", driver.title)
+
+            # Wait for login field
+            WebDriverWait(driver, 20).until(
                 EC.presence_of_element_located((By.ID, "txtusername"))
             )
 
@@ -80,7 +83,7 @@ class EnrollmentAgent:
             driver.find_element(By.ID, "txtpassword").send_keys(PASSWORD)
             driver.find_element(By.ID, "btnlogin").click()
 
-            WebDriverWait(driver, 15).until(
+            WebDriverWait(driver, 20).until(
                 EC.url_contains("StudentPortal")
             )
 
@@ -88,7 +91,7 @@ class EnrollmentAgent:
 
             driver.get(ENROLL_URL)
 
-            dropdown_element = WebDriverWait(driver, 15).until(
+            dropdown_element = WebDriverWait(driver, 20).until(
                 EC.presence_of_element_located((By.ID, "cphbody_ddlslot"))
             )
 
@@ -130,6 +133,10 @@ class EnrollmentAgent:
             print("Observed data:", data)
             return data
 
+        except TimeoutException:
+            print("Timeout occurred while waiting for element.")
+            raise
+
         finally:
             driver.quit()
             print("Browser closed.")
@@ -137,7 +144,6 @@ class EnrollmentAgent:
     # ---------------- REASON ----------------
 
     def reason(self, current_data):
-        print("Analyzing changes...")
         known = self.memory["known_courses"]
 
         new_courses = []
@@ -183,7 +189,7 @@ class EnrollmentAgent:
         })
         print("Telegram response:", response.text)
 
-    # ---------------- MAIN ----------------
+    # ---------------- RUN ONCE ----------------
 
     def run_once(self):
         print("Agent execution started.")
