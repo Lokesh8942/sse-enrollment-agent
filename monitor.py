@@ -2,17 +2,18 @@ import os
 import time
 import json
 import re
-import random
-import statistics
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select, WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 load_dotenv()
 
@@ -27,31 +28,27 @@ ENROLL_URL = "https://arms.sse.saveetha.com/StudentPortal/Enrollment.aspx"
 DATA_FILE = "agent_memory.json"
 
 
-class IntelligentEnrollmentAgent:
+class EnrollmentAgent:
 
     def __init__(self):
-        self.prefix = "CSA07"
-        self.base_interval = 120
-        self.failure_count = 0
+        self.prefix = "ECA47"
         self.memory = self.load_memory()
 
-    # ================= MEMORY =================
+    # ---------------- MEMORY ----------------
 
     def load_memory(self):
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "r") as f:
                 return json.load(f)
         return {
-            "known_courses": {},
-            "release_hours": [],
-            "failures": []
+            "known_courses": {}
         }
 
     def save_memory(self):
         with open(DATA_FILE, "w") as f:
             json.dump(self.memory, f, indent=4)
 
-    # ================= DRIVER =================
+    # ---------------- DRIVER ----------------
 
     def build_driver(self):
         options = Options()
@@ -59,9 +56,11 @@ class IntelligentEnrollmentAgent:
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--window-size=1920,1080")
-        return webdriver.Chrome(options=options)
 
-    # ================= OBSERVE =================
+        service = Service(ChromeDriverManager().install())
+        return webdriver.Chrome(service=service, options=options)
+
+    # ---------------- OBSERVE ----------------
 
     def observe(self):
         print("Launching browser...")
@@ -72,7 +71,7 @@ class IntelligentEnrollmentAgent:
             print("Opening login page...")
             driver.get(LOGIN_URL)
 
-            WebDriverWait(driver, 10).until(
+            WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.ID, "txtusername"))
             )
 
@@ -81,14 +80,15 @@ class IntelligentEnrollmentAgent:
             driver.find_element(By.ID, "txtpassword").send_keys(PASSWORD)
             driver.find_element(By.ID, "btnlogin").click()
 
-            WebDriverWait(driver, 10).until(
+            WebDriverWait(driver, 15).until(
                 EC.url_contains("StudentPortal")
             )
 
-            print("Login successful. Opening enrollment page...")
+            print("Login successful.")
+
             driver.get(ENROLL_URL)
 
-            dropdown_element = WebDriverWait(driver, 10).until(
+            dropdown_element = WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.ID, "cphbody_ddlslot"))
             )
 
@@ -100,10 +100,10 @@ class IntelligentEnrollmentAgent:
                 if option.get_attribute("value")
             ]
 
-            print("Detected slots:", slots)
+            print("Slots found:", slots)
 
             for slot in slots:
-                print(f"Scanning Slot {slot}...")
+                print(f"Scanning Slot {slot}")
                 slot_select.select_by_value(slot)
                 time.sleep(3)
 
@@ -111,6 +111,7 @@ class IntelligentEnrollmentAgent:
 
                 for row in rows:
                     text = row.text.strip()
+
                     if self.prefix in text:
                         parts = text.split()
 
@@ -133,80 +134,46 @@ class IntelligentEnrollmentAgent:
             driver.quit()
             print("Browser closed.")
 
-    # ================= REASON =================
+    # ---------------- REASON ----------------
 
     def reason(self, current_data):
-        print("Reasoning phase...")
+        print("Analyzing changes...")
         known = self.memory["known_courses"]
 
         new_courses = []
-        seat_updates = []
+        seat_changes = []
 
         for code, seats in current_data.items():
             if code not in known:
-                print("New course detected:", code)
                 new_courses.append(code)
-                self.memory["release_hours"].append(datetime.now().hour)
             else:
                 if seats != known[code]:
-                    print(f"Seat change detected for {code}: {known[code]} -> {seats}")
-                    seat_updates.append((code, seats))
+                    seat_changes.append((code, seats))
 
-        decision = {
-            "new_courses": new_courses,
-            "seat_updates": seat_updates
-        }
+        return new_courses, seat_changes
 
-        print("Decision:", decision)
-        return decision
+    # ---------------- ACT ----------------
 
-    # ================= ACT =================
-
-    def act(self, decision):
+    def act(self, new_courses, seat_changes):
         messages = []
 
-        if decision["new_courses"]:
+        if new_courses:
             messages.append(
                 "🚨 NEW COURSE RELEASED:\n" +
-                ", ".join(decision["new_courses"])
+                ", ".join(new_courses)
             )
 
-        for code, seats in decision["seat_updates"]:
+        for code, seats in seat_changes:
             messages.append(f"🔄 Seat Update: {code} → {seats}")
 
         if messages:
             message_text = "\n\n".join(messages)
             print("Sending Telegram alert...")
             self.send_telegram(message_text)
-
-    # ================= ADAPT =================
-
-    def adapt(self, success=True):
-        if success:
-            self.failure_count = 0
         else:
-            self.failure_count += 1
+            print("No changes detected.")
 
-        # Predictive acceleration
-        if len(self.memory["release_hours"]) >= 3:
-            try:
-                common_hour = statistics.mode(self.memory["release_hours"])
-                current_hour = datetime.now().hour
-
-                if abs(current_hour - common_hour) <= 1:
-                    print("Release window detected. Increasing frequency.")
-                    return 30
-            except:
-                pass
-
-        # Failure slowdown
-        if self.failure_count >= 3:
-            print("Repeated failures. Slowing down checks.")
-            return min(self.base_interval + 60, 600)
-
-        return self.base_interval + random.randint(0, 20)
-
-    # ================= TELEGRAM =================
+    # ---------------- TELEGRAM ----------------
 
     def send_telegram(self, message):
         url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -216,36 +183,22 @@ class IntelligentEnrollmentAgent:
         })
         print("Telegram response:", response.text)
 
-    # ================= RUN =================
+    # ---------------- MAIN ----------------
 
-    def run(self):
-        while True:
-            try:
-                print("\n==============================")
-                print("AGENT OBSERVING...")
-                print("==============================")
+    def run_once(self):
+        print("Agent execution started.")
+        current_data = self.observe()
 
-                current_data = self.observe()
+        new_courses, seat_changes = self.reason(current_data)
 
-                decision = self.reason(current_data)
+        self.memory["known_courses"] = current_data
+        self.save_memory()
 
-                self.memory["known_courses"] = current_data
-                self.save_memory()
+        self.act(new_courses, seat_changes)
 
-                self.act(decision)
-
-                wait = self.adapt(success=True)
-
-            except Exception as e:
-                print("Failure occurred:", e)
-                self.memory["failures"].append(str(e))
-                self.save_memory()
-                wait = self.adapt(success=False)
-
-            print(f"Next check in {wait} seconds.")
-            time.sleep(wait)
+        print("Agent execution finished.")
 
 
 if __name__ == "__main__":
-    agent = IntelligentEnrollmentAgent()
-    agent.run()
+    agent = EnrollmentAgent()
+    agent.run_once()
