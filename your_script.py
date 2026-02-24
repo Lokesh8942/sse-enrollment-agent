@@ -3,15 +3,13 @@ import time
 import json
 import re
 import requests
-from datetime import datetime
 from dotenv import load_dotenv
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import Select, WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import Select
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import NoSuchElementException
 
 load_dotenv()
 
@@ -67,35 +65,38 @@ class EnrollmentAgent:
         try:
             print("Opening login page...")
             driver.get(LOGIN_URL)
-
             time.sleep(5)
 
             print("Current URL:", driver.current_url)
             print("Page title:", driver.title)
 
-            # Wait for login field
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.ID, "txtusername"))
-            )
+            print("\n===== PAGE SOURCE (FIRST 1500 CHARS) =====")
+            print(driver.page_source[:1500])
+            print("==========================================\n")
+
+            # Check manually if element exists
+            try:
+                username_field = driver.find_element(By.ID, "txtusername")
+                print("Username field FOUND.")
+            except NoSuchElementException:
+                print("Username field NOT FOUND.")
+                raise Exception("Login page structure changed or blocked.")
 
             print("Entering credentials...")
-            driver.find_element(By.ID, "txtusername").send_keys(USERNAME)
+            username_field.send_keys(USERNAME)
             driver.find_element(By.ID, "txtpassword").send_keys(PASSWORD)
             driver.find_element(By.ID, "btnlogin").click()
 
-            WebDriverWait(driver, 20).until(
-                EC.url_contains("StudentPortal")
-            )
+            time.sleep(5)
 
-            print("Login successful.")
+            print("After login URL:", driver.current_url)
+            print("After login title:", driver.title)
 
             driver.get(ENROLL_URL)
+            time.sleep(5)
 
-            dropdown_element = WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.ID, "cphbody_ddlslot"))
-            )
-
-            slot_select = Select(dropdown_element)
+            dropdown = driver.find_element(By.ID, "cphbody_ddlslot")
+            slot_select = Select(dropdown)
 
             slots = [
                 option.get_attribute("value")
@@ -133,61 +134,9 @@ class EnrollmentAgent:
             print("Observed data:", data)
             return data
 
-        except TimeoutException:
-            print("Timeout occurred while waiting for element.")
-            raise
-
         finally:
             driver.quit()
             print("Browser closed.")
-
-    # ---------------- REASON ----------------
-
-    def reason(self, current_data):
-        known = self.memory["known_courses"]
-
-        new_courses = []
-        seat_changes = []
-
-        for code, seats in current_data.items():
-            if code not in known:
-                new_courses.append(code)
-            else:
-                if seats != known[code]:
-                    seat_changes.append((code, seats))
-
-        return new_courses, seat_changes
-
-    # ---------------- ACT ----------------
-
-    def act(self, new_courses, seat_changes):
-        messages = []
-
-        if new_courses:
-            messages.append(
-                "🚨 NEW COURSE RELEASED:\n" +
-                ", ".join(new_courses)
-            )
-
-        for code, seats in seat_changes:
-            messages.append(f"🔄 Seat Update: {code} → {seats}")
-
-        if messages:
-            message_text = "\n\n".join(messages)
-            print("Sending Telegram alert...")
-            self.send_telegram(message_text)
-        else:
-            print("No changes detected.")
-
-    # ---------------- TELEGRAM ----------------
-
-    def send_telegram(self, message):
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-        response = requests.post(url, data={
-            "chat_id": TG_CHAT,
-            "text": message
-        })
-        print("Telegram response:", response.text)
 
     # ---------------- RUN ONCE ----------------
 
@@ -195,14 +144,8 @@ class EnrollmentAgent:
         print("Agent execution started.")
         current_data = self.observe()
 
-        new_courses, seat_changes = self.reason(current_data)
-
-        self.memory["known_courses"] = current_data
-        self.save_memory()
-
-        self.act(new_courses, seat_changes)
-
-        print("Agent execution finished.")
+        print("Execution completed.")
+        print("Data collected:", current_data)
 
 
 if __name__ == "__main__":
