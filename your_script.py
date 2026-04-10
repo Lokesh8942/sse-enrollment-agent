@@ -16,9 +16,12 @@ load_dotenv()
 USERNAME = os.getenv("COLLEGE_USER")
 PASSWORD = os.getenv("COLLEGE_PASS")
 TG_TOKEN = os.getenv("TG_TOKEN")
-TG_CHAT = os.getenv("TG_CHAT")
+TG_CHAT  = os.getenv("TG_CHAT")
 
-LOGIN_URL = "https://arms.sse.saveetha.com/Login.aspx"
+if not USERNAME or not PASSWORD:
+    raise EnvironmentError("COLLEGE_USER and COLLEGE_PASS must be set as environment variables.")
+
+LOGIN_URL  = "https://arms.sse.saveetha.com/Login.aspx"
 ENROLL_URL = "https://arms.sse.saveetha.com/StudentPortal/Enrollment.aspx"
 
 DATA_FILE = "agent_memory.json"
@@ -56,6 +59,21 @@ class EnrollmentAgent:
 
         return webdriver.Chrome(options=options)
 
+    # ---------------- TELEGRAM ----------------
+
+    def send_alert(self, code, seats):
+        if not TG_TOKEN or not TG_CHAT:
+            print(f"ALERT: {code} has {seats} seats! (Telegram not configured)")
+            return
+
+        msg = f"🎓 Seat available!\nCourse: {code}\nSeats: {seats}\nEnroll: {ENROLL_URL}"
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        try:
+            requests.post(url, data={"chat_id": TG_CHAT, "text": msg}, timeout=10)
+            print(f"Telegram alert sent for {code}")
+        except Exception as e:
+            print(f"Failed to send Telegram alert: {e}")
+
     # ---------------- OBSERVE ----------------
 
     def observe(self):
@@ -70,10 +88,6 @@ class EnrollmentAgent:
 
             print("Current URL:", driver.current_url)
             print("Page title:", driver.title)
-
-            print("\n===== PAGE SOURCE (FIRST 1500 CHARS) =====")
-            print(driver.page_source[:1500])
-            print("==========================================\n")
 
             try:
                 username_field = driver.find_element(By.ID, "txtusername")
@@ -138,16 +152,26 @@ class EnrollmentAgent:
             driver.quit()
             print("Browser closed.")
 
-    # ---------------- RUN ONCE ----------------
+    # ---------------- RUN LOOP ----------------
 
-    def run_once(self):
-        print("Agent execution started.")
-        current_data = self.observe()
+    def run_loop(self):
+        print("Agent started. Running every 5 minutes...")
+        while True:
+            try:
+                print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Checking enrollment...")
+                current_data = self.observe()
+                print("Data collected:", current_data)
 
-        print("Execution completed.")
-        print("Data collected:", current_data)
+                for code, seats in current_data.items():
+                    if seats > 0:
+                        self.send_alert(code, seats)
+
+            except Exception as e:
+                print(f"Error during run: {e}")
+
+            time.sleep(300)  # wait 5 minutes before next check
 
 
 if __name__ == "__main__":
     agent = EnrollmentAgent()
-    agent.run_once()
+    agent.run_loop()
