@@ -312,6 +312,10 @@ class EnrollmentAgent:
             add_log(f"Found {len(slots)} slots.")
 
             for slot in slots:
+                if slot.strip().upper() == "E":
+                    add_log("Skipping Slot E.")
+                    continue
+
                 slot_select.select_by_value(slot)
                 time.sleep(3)
 
