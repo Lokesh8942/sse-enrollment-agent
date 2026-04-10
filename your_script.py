@@ -28,6 +28,8 @@ ENROLL_URL = "https://arms.sse.saveetha.com/StudentPortal/Enrollment.aspx"
 
 DATA_FILE = "agent_memory.json"
 
+EXCLUDED_SLOTS = {"E", "5"}
+
 # Shared state for dashboard
 dashboard_state = {
     "last_updated": "Never",
@@ -41,20 +43,35 @@ state_lock = threading.Lock()
 
 def render_dashboard():
     with state_lock:
-        courses = dashboard_state["courses"]
+        courses      = dashboard_state["courses"]
         last_updated = dashboard_state["last_updated"]
-        log = dashboard_state["log"][-20:]  # last 20 log lines
+        log          = dashboard_state["log"][-20:]
 
     rows = ""
-    for code, seats in sorted(courses.items()):
+    for code, info in sorted(courses.items()):
+        seats   = info.get("seats", 0)
+        title   = info.get("title", "-")
+        faculty = info.get("faculty", "-")
+        slot    = info.get("slot", "-")
+        t       = info.get("time", "-")
+
         if seats > 0:
             badge = f'<span class="badge open">{seats} seats</span>'
         else:
             badge = '<span class="badge full">Full</span>'
-        rows += f"<tr><td>{code}</td><td>{badge}</td></tr>"
+
+        rows += f"""
+        <tr>
+          <td>{slot}</td>
+          <td><strong>{code}</strong></td>
+          <td>{title}</td>
+          <td>{faculty}</td>
+          <td>{badge}</td>
+          <td>{t}</td>
+        </tr>"""
 
     if not rows:
-        rows = '<tr><td colspan="2" class="empty">No courses scanned yet. Check back in a moment.</td></tr>'
+        rows = '<tr><td colspan="6" class="empty">No courses scanned yet. Check back in a moment.</td></tr>'
 
     log_lines = "".join(f"<div class='log-line'>{line}</div>" for line in reversed(log))
 
@@ -74,124 +91,67 @@ def render_dashboard():
       min-height: 100vh;
       padding: 2rem;
     }}
-    h1 {{
-      font-size: 1.8rem;
-      font-weight: 700;
-      color: #38bdf8;
-      margin-bottom: 0.3rem;
-    }}
-    .subtitle {{
-      color: #94a3b8;
-      font-size: 0.9rem;
-      margin-bottom: 2rem;
-    }}
+    h1 {{ font-size: 1.8rem; font-weight: 700; color: #38bdf8; margin-bottom: 0.3rem; }}
+    .subtitle {{ color: #94a3b8; font-size: 0.9rem; margin-bottom: 2rem; }}
     .last-updated {{
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 8px;
-      padding: 0.6rem 1rem;
-      display: inline-block;
-      font-size: 0.85rem;
-      color: #94a3b8;
-      margin-bottom: 1.5rem;
+      background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+      padding: 0.6rem 1rem; display: inline-block;
+      font-size: 0.85rem; color: #94a3b8; margin-bottom: 1.5rem;
     }}
+    .table-wrap {{ overflow-x: auto; }}
     table {{
-      width: 100%;
-      max-width: 700px;
-      border-collapse: collapse;
-      background: #1e293b;
-      border-radius: 12px;
-      overflow: hidden;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+      width: 100%; border-collapse: collapse;
+      background: #1e293b; border-radius: 12px;
+      overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.4);
     }}
-    thead {{
-      background: #0f172a;
-    }}
+    thead {{ background: #0f172a; }}
     th {{
-      padding: 0.9rem 1.2rem;
-      text-align: left;
-      font-size: 0.8rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: #64748b;
+      padding: 0.9rem 1rem; text-align: left;
+      font-size: 0.75rem; text-transform: uppercase;
+      letter-spacing: 0.05em; color: #64748b;
     }}
-    td {{
-      padding: 0.85rem 1.2rem;
-      border-top: 1px solid #334155;
-      font-size: 0.95rem;
-    }}
+    td {{ padding: 0.8rem 1rem; border-top: 1px solid #334155; font-size: 0.88rem; }}
     tr:hover td {{ background: #263348; }}
     .badge {{
-      padding: 0.3rem 0.75rem;
-      border-radius: 999px;
-      font-size: 0.8rem;
-      font-weight: 600;
+      padding: 0.3rem 0.75rem; border-radius: 999px;
+      font-size: 0.78rem; font-weight: 600;
     }}
-    .badge.open {{
-      background: #064e3b;
-      color: #34d399;
-      border: 1px solid #34d399;
-    }}
-    .badge.full {{
-      background: #3b0764;
-      color: #c084fc;
-      border: 1px solid #c084fc;
-    }}
-    .empty {{
-      text-align: center;
-      color: #475569;
-      padding: 2rem;
-    }}
-    .log-section {{
-      margin-top: 2rem;
-      max-width: 700px;
-    }}
+    .badge.open {{ background: #064e3b; color: #34d399; border: 1px solid #34d399; }}
+    .badge.full {{ background: #3b0764; color: #c084fc; border: 1px solid #c084fc; }}
+    .empty {{ text-align: center; color: #475569; padding: 2rem; }}
+    .log-section {{ margin-top: 2rem; }}
     .log-section h2 {{
-      font-size: 1rem;
-      color: #64748b;
-      margin-bottom: 0.8rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
+      font-size: 0.85rem; color: #64748b; margin-bottom: 0.8rem;
+      text-transform: uppercase; letter-spacing: 0.05em;
     }}
     .log-box {{
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 12px;
-      padding: 1rem 1.2rem;
-      font-family: monospace;
-      font-size: 0.8rem;
-      color: #94a3b8;
-      max-height: 250px;
-      overflow-y: auto;
+      background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+      padding: 1rem 1.2rem; font-family: monospace; font-size: 0.78rem;
+      color: #94a3b8; max-height: 220px; overflow-y: auto;
     }}
-    .log-line {{ padding: 2px 0; border-bottom: 1px solid #1e293b; }}
-    .footer {{
-      margin-top: 2rem;
-      font-size: 0.75rem;
-      color: #334155;
-    }}
+    .log-line {{ padding: 2px 0; border-bottom: 1px solid #263348; }}
+    .footer {{ margin-top: 2rem; font-size: 0.75rem; color: #334155; }}
   </style>
 </head>
 <body>
   <h1>📋 SSE Enrollment Monitor</h1>
-  <p class="subtitle">Auto-refreshes every 60 seconds &nbsp;·&nbsp; Scans every 5 minutes</p>
-
+  <p class="subtitle">Auto-refreshes every 60s &nbsp;·&nbsp; Scans every 5 min &nbsp;·&nbsp; Slots E & 5 excluded</p>
   <div class="last-updated">🕒 Last scanned: {last_updated}</div>
-
-  <table>
-    <thead>
-      <tr><th>Course Code</th><th>Availability</th></tr>
-    </thead>
-    <tbody>
-      {rows}
-    </tbody>
-  </table>
-
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Slot</th><th>Code</th><th>Title</th>
+          <th>Faculty</th><th>Availability</th><th>Detected At</th>
+        </tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
   <div class="log-section">
     <h2>Agent Log</h2>
     <div class="log-box">{log_lines if log_lines else "<div class='log-line'>No logs yet.</div>"}</div>
   </div>
-
   <p class="footer">Saveetha School of Engineering &nbsp;·&nbsp; ARMS Portal Monitor</p>
 </body>
 </html>"""
@@ -251,13 +211,11 @@ class EnrollmentAgent:
     def build_driver(self):
         options = Options()
         options.binary_location = "/usr/bin/google-chrome"
-
         options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--window-size=1920,1080")
-
         return webdriver.Chrome(options=options)
 
     # ---------------- TELEGRAM ----------------
@@ -266,11 +224,10 @@ class EnrollmentAgent:
         if not TG_TOKEN or not TG_CHAT:
             add_log(f"ALERT (Telegram not configured): {message}")
             return
-
         url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
         try:
             requests.post(url, data={"chat_id": TG_CHAT, "text": message}, timeout=10)
-            add_log(f"Telegram alert sent.")
+            add_log("Telegram alert sent.")
         except Exception as e:
             add_log(f"Telegram error: {e}")
 
@@ -300,7 +257,7 @@ class EnrollmentAgent:
             driver.get(ENROLL_URL)
             time.sleep(5)
 
-            dropdown = driver.find_element(By.ID, "cphbody_ddlslot")
+            dropdown    = driver.find_element(By.ID, "cphbody_ddlslot")
             slot_select = Select(dropdown)
 
             slots = [
@@ -312,27 +269,29 @@ class EnrollmentAgent:
             add_log(f"Found {len(slots)} slots.")
 
             for slot in slots:
-                if slot.strip().upper() == "E":
-                    add_log("Skipping Slot E.")
+                if slot.strip().upper() in EXCLUDED_SLOTS:
+                    add_log(f"Skipping Slot {slot}.")
                     continue
 
                 slot_select.select_by_value(slot)
                 time.sleep(3)
 
+                slot_name = slot_select.first_selected_option.text.strip()
+
                 rows = driver.find_elements(By.TAG_NAME, "tr")
 
                 for row in rows:
                     cells = row.find_elements(By.TAG_NAME, "td")
-                    if len(cells) < 2:
+                    if len(cells) < 3:
                         continue
 
                     text = row.text.strip()
                     if not text:
                         continue
 
-                    parts = text.split()
+                    # Extract course code
                     code = None
-                    for part in parts:
+                    for part in text.split():
                         if re.match(r"^[A-Z]{2,}\d{3,}", part):
                             code = part
                             break
@@ -340,11 +299,23 @@ class EnrollmentAgent:
                     if not code:
                         continue
 
+                    cell_texts = [c.text.strip() for c in cells]
+                    title      = cell_texts[2] if len(cell_texts) > 2 else ""
+                    faculty    = cell_texts[3] if len(cell_texts) > 3 else ""
+
                     numbers = re.findall(r"\d+", text)
-                    if numbers:
-                        seats = int(numbers[-1])
-                        if code not in data or seats > data[code]:
-                            data[code] = seats
+                    seats   = int(numbers[-1]) if numbers else 0
+
+                    entry = {
+                        "seats":   seats,
+                        "title":   title,
+                        "faculty": faculty,
+                        "slot":    slot_name,
+                        "time":    time.strftime("%H:%M:%S"),
+                    }
+
+                    if code not in data or seats > data[code]["seats"]:
+                        data[code] = entry
 
             add_log(f"Scan complete. {len(data)} courses found.")
             return data
@@ -360,41 +331,62 @@ class EnrollmentAgent:
         new_courses    = []
         opened_courses = []
 
-        for code, seats in current_data.items():
+        for code, info in current_data.items():
             if code not in seen:
-                new_courses.append((code, seats))
-            elif seen[code] == 0 and seats > 0:
-                opened_courses.append((code, seats))
+                new_courses.append((code, info))
+            elif seen[code].get("seats", 0) == 0 and info["seats"] > 0:
+                opened_courses.append((code, info))
 
-        for code, seats in new_courses:
+        # --- New course alerts ---
+        slot_summary = {}
+        for code, info in new_courses:
+            slot = info.get("slot", "Unknown")
             msg = (
-                f"🆕 New Course Released!\n"
-                f"Course: {code}\n"
-                f"Seats: {seats}\n"
-                f"Enroll: {ENROLL_URL}"
+                f"🆕 NEW COURSE DETECTED\n"
+                f"{'—'*30}\n"
+                f"📍 Slot: {slot}\n"
+                f"📚 Code: {code}\n"
+                f"📖 Title: {info.get('title', 'N/A')}\n"
+                f"👩‍🏫 Faculty: {info.get('faculty', 'N/A')}\n"
+                f"🪑 Vacancies: {info.get('seats', 0)}\n"
+                f"🕐 Time: {info.get('time', 'N/A')}"
             )
-            add_log(f"NEW course detected: {code} ({seats} seats)")
+            add_log(f"NEW course: {code} | {slot} | {info.get('title', '')}")
             self.send_alert(msg)
+            slot_summary[slot] = slot_summary.get(slot, 0) + 1
 
-        for code, seats in opened_courses:
+        # Cycle summary per slot
+        if slot_summary:
+            summary_lines = "\n".join(f"{s}: {c}" for s, c in slot_summary.items())
+            total = sum(slot_summary.values())
+            summary_msg = f"📊 Cycle summary: {total} new course(s)\n{summary_lines}"
+            self.send_alert(summary_msg)
+
+        # --- Seats opened alerts ---
+        for code, info in opened_courses:
+            slot = info.get("slot", "Unknown")
             msg = (
-                f"🟢 Seats Now Available!\n"
-                f"Course: {code}\n"
-                f"Seats: {seats}\n"
-                f"Enroll: {ENROLL_URL}"
+                f"🟢 SEATS NOW AVAILABLE\n"
+                f"{'—'*30}\n"
+                f"📍 Slot: {slot}\n"
+                f"📚 Code: {code}\n"
+                f"📖 Title: {info.get('title', 'N/A')}\n"
+                f"👩‍🏫 Faculty: {info.get('faculty', 'N/A')}\n"
+                f"🪑 Vacancies: {info.get('seats', 0)}\n"
+                f"🕐 Time: {info.get('time', 'N/A')}"
             )
-            add_log(f"Seats opened: {code} ({seats} seats)")
+            add_log(f"Seats opened: {code} | {slot}")
             self.send_alert(msg)
 
         if not new_courses and not opened_courses:
             add_log("No new courses or seat changes.")
 
-        # Update memory and dashboard state
+        # Update memory and dashboard
         self.memory["seen_courses"] = current_data
         self.save_memory()
 
         with state_lock:
-            dashboard_state["courses"] = current_data
+            dashboard_state["courses"]      = current_data
             dashboard_state["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
     # ---------------- RUN LOOP ----------------
