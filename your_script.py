@@ -2,7 +2,9 @@ import os
 import time
 import json
 import re
+import threading
 import requests
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 
 from selenium import webdriver
@@ -26,6 +28,27 @@ ENROLL_URL = "https://arms.sse.saveetha.com/StudentPortal/Enrollment.aspx"
 
 DATA_FILE = "agent_memory.json"
 
+
+# ---------------- HEALTH SERVER ----------------
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, *args):
+        pass  # suppress access logs
+
+
+def start_health_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    print(f"Health server running on port {port}")
+    server.serve_forever()
+
+
+# ---------------- AGENT ----------------
 
 class EnrollmentAgent:
 
@@ -173,5 +196,8 @@ class EnrollmentAgent:
 
 
 if __name__ == "__main__":
+    # Start health server in background so Render detects an open port
+    threading.Thread(target=start_health_server, daemon=True).start()
+
     agent = EnrollmentAgent()
     agent.run_loop()
