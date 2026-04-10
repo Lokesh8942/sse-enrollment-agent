@@ -42,19 +42,19 @@ class EnrollmentAgent:
         with open(DATA_FILE, "w") as f:
             json.dump(self.memory, f, indent=4)
 
-    # ---------------- DRIVER ----------------#
+    # ---------------- DRIVER ----------------
 
     def build_driver(self):
-    options = Options()
-    options.binary_location = "/usr/bin/google-chrome"
+        options = Options()
+        options.binary_location = "/usr/bin/google-chrome"
 
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
 
-    return webdriver.Chrome(options=options)
+        return webdriver.Chrome(options=options)
 
     # ---------------- OBSERVE ----------------
 
@@ -75,7 +75,6 @@ class EnrollmentAgent:
             print(driver.page_source[:1500])
             print("==========================================\n")
 
-            # Check manually if element exists
             try:
                 username_field = driver.find_element(By.ID, "txtusername")
                 print("Username field FOUND.")
@@ -152,4 +151,3 @@ class EnrollmentAgent:
 if __name__ == "__main__":
     agent = EnrollmentAgent()
     agent.run_once()
-
