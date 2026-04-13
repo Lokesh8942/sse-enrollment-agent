@@ -14,7 +14,7 @@ from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException, StaleElementReferenceException
 
 load_dotenv()
 
@@ -90,13 +90,12 @@ def increment_alerts():
 #   0 = S.No  1 = Course Code  2 = Course Title  3 = Faculty  4 = Available Seats  5 = ...
 # But sometimes cols shift. We detect robustly by scanning all cells.
 
-def parse_row(cells):
+def parse_row_from_text(row_text, cell_texts):
     """
-    Returns (code, title, faculty, seats) from a table row's cells.
-    Uses regex to identify which cell is code and which is seats,
-    then infers title and faculty from surrounding cells.
+    Returns (code, title, faculty, seats) from pre-snapshotted cell text list.
+    Uses regex to robustly identify columns regardless of table structure.
     """
-    ct = [c.text.strip() for c in cells]
+    ct = cell_texts
     if not any(ct):
         return None, None, None, 0
 
@@ -104,22 +103,19 @@ def parse_row(cells):
     seats_idx = None
 
     for i, val in enumerate(ct):
-        # Course code: letters followed by digits, 6+ chars e.g. ECA1401, SPIC5A07
         if re.match(r'^[A-Z]{2,}\d{2,}', val.upper()) and len(val) >= 5:
             if code_idx is None:
                 code_idx = i
-        # Seats: pure small number (0-999)
         if re.fullmatch(r'\d{1,3}', val):
             seats_idx = i
 
     if code_idx is None:
         return None, None, None, 0
 
-    code  = ct[code_idx].split()[0].upper()   # take only first token in case of extra text
+    code  = ct[code_idx].split()[0].upper()
     seats = int(ct[seats_idx]) if seats_idx is not None else 0
 
-    # Title is the cell right after code_idx (if it exists and isn't a number)
-    title  = ""
+    title   = ""
     faculty = ""
 
     if code_idx + 1 < len(ct) and not re.fullmatch(r'\d+', ct[code_idx + 1]):
@@ -128,6 +124,106 @@ def parse_row(cells):
         faculty = ct[code_idx + 2]
 
     return code, title, faculty, seats
+
+
+def get_dropdown_slots(driver):
+    """Re-fetch dropdown and return list of slot values. Always fresh."""
+    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "cphbody_ddlslot")))
+    sel   = Select(driver.find_element(By.ID, "cphbody_ddlslot"))
+    slots = [o.get_attribute("value") for o in sel.options if o.get_attribute("value")]
+    return slots
+
+
+def safe_read_rows(driver):
+    """
+    Snapshot all table rows as plain text immediately after page load.
+    Returns list of (row_text, cell_texts_list).
+    """
+    results = []
+    try:
+        rows = driver.find_elements(By.TAG_NAME, "tr")
+        for row in rows:
+            try:
+                cells = row.find_elements(By.TAG_NAME, "td")
+                if len(cells) < 3:
+                    continue
+                row_text   = row.text.strip()
+                cell_texts = []
+                for c in cells:
+                    try:
+                        cell_texts.append(c.text.strip())
+                    except StaleElementReferenceException:
+                        cell_texts.append("")
+                if row_text:
+                    results.append((row_text, cell_texts))
+            except StaleElementReferenceException:
+                continue
+    except StaleElementReferenceException:
+        pass
+    return results
+
+
+def scan_all_slots(driver, query=None):
+    """
+    Scan all non-excluded slots.
+    If query is set, only collect rows matching that query (case-insensitive).
+    Returns dict: { code: {seats, title, faculty, slot, time} }
+    """
+    driver.get(ENROLL_URL)
+    slots = get_dropdown_slots(driver)
+    data  = {}
+
+    for slot in slots:
+        if slot.strip().upper() in EXCLUDED_SLOTS:
+            continue
+
+        # Re-fetch dropdown every iteration — old reference goes stale after DOM update
+        try:
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "cphbody_ddlslot")))
+            sel = Select(driver.find_element(By.ID, "cphbody_ddlslot"))
+            sel.select_by_value(slot)
+        except StaleElementReferenceException:
+            time.sleep(1)
+            sel = Select(driver.find_element(By.ID, "cphbody_ddlslot"))
+            sel.select_by_value(slot)
+
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "tr td"))
+            )
+        except TimeoutException:
+            time.sleep(1)
+
+        try:
+            slot_name = Select(driver.find_element(By.ID, "cphbody_ddlslot")).first_selected_option.text.strip()
+        except StaleElementReferenceException:
+            slot_name = f"Slot {slot}"
+
+        for row_text, cell_texts in safe_read_rows(driver):
+            if query and query.upper() not in row_text.upper():
+                continue
+
+            code, title, faculty, seats = parse_row_from_text(row_text, cell_texts)
+            if not code:
+                continue
+
+            entry = {
+                "seats":   seats,
+                "title":   title,
+                "faculty": faculty,
+                "slot":    slot_name,
+                "time":    time.strftime("%H:%M:%S"),
+                "is_new":  False,
+            }
+
+            if query:
+                key = f"{code}_{slot_name}"
+                data[key] = {**entry, "code": code}
+            else:
+                if code not in data or seats > data[code]["seats"]:
+                    data[code] = entry
+
+    return data
 
 
 # ── Dashboard HTML ────────────────────────────────────────
