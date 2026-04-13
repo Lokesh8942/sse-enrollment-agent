@@ -655,10 +655,27 @@ class EnrollmentAgent:
             time.sleep(300)
 
 
+# ── Self-ping to prevent Render free tier sleep ───────────
+
+def self_ping():
+    app_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if not app_url:
+        add_log("RENDER_EXTERNAL_URL not set, self-ping disabled.")
+        return
+    add_log(f"Self-ping started → {app_url}")
+    while True:
+        try:
+            requests.get(app_url, timeout=10)
+        except Exception:
+            pass
+        time.sleep(45)
+
+
 # ── Entry point ───────────────────────────────────────────
 
 if __name__ == "__main__":
     load_stats()
-    threading.Thread(target=start_dashboard_server,    daemon=True).start()
-    threading.Thread(target=poll_telegram_commands,    daemon=True).start()
+    threading.Thread(target=start_dashboard_server, daemon=True).start()
+    threading.Thread(target=poll_telegram_commands, daemon=True).start()
+    threading.Thread(target=self_ping,              daemon=True).start()
     EnrollmentAgent().run_loop()
