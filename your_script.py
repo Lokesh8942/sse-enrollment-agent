@@ -166,12 +166,16 @@ def safe_read_rows(driver):
 def scan_all_slots(driver, query=None):
     """
     Scan all non-excluded slots.
-    If query is set, only collect rows matching that query (case-insensitive).
+    If query is set (str), only collect rows matching that query (case-insensitive).
     Returns dict: { code: {seats, title, faculty, slot, time} }
     """
     driver.get(ENROLL_URL)
-    slots = get_dropdown_slots(driver)
-    data  = {}
+    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "cphbody_ddlslot")))
+
+    sel   = Select(driver.find_element(By.ID, "cphbody_ddlslot"))
+    slots = [o.get_attribute("value") for o in sel.options if o.get_attribute("value")]
+
+    data = {}
 
     for slot in slots:
         if slot.strip().upper() in EXCLUDED_SLOTS:
@@ -410,74 +414,6 @@ def login_driver(driver):
     except TimeoutException:
         return False
     return True
-
-
-def scan_all_slots(driver, query=None):
-    """
-    Scan all non-excluded slots.
-    If query is set (str), only collect rows matching that query (case-insensitive).
-    Returns dict: { code: {seats, title, faculty, slot, time} }
-    """
-    driver.get(ENROLL_URL)
-    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "cphbody_ddlslot")))
-
-    sel   = Select(driver.find_element(By.ID, "cphbody_ddlslot"))
-    slots = [o.get_attribute("value") for o in sel.options if o.get_attribute("value")]
-
-    data = {}
-
-    for slot in slots:
-        if slot.strip().upper() in EXCLUDED_SLOTS:
-            continue
-
-        sel.select_by_value(slot)
-
-        # Wait for table to refresh — wait for at least one <tr> with <td>s
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "tr td"))
-            )
-        except TimeoutException:
-            time.sleep(1)
-
-        slot_name = sel.first_selected_option.text.strip()
-
-        for row in driver.find_elements(By.TAG_NAME, "tr"):
-            cells = row.find_elements(By.TAG_NAME, "td")
-            if len(cells) < 3:
-                continue
-
-            text = row.text.strip()
-            if not text:
-                continue
-
-            # If doing a targeted search, skip rows that don't match
-            if query and query.upper() not in text.upper():
-                continue
-
-            code, title, faculty, seats = parse_row(cells)
-            if not code:
-                continue
-
-            entry = {
-                "seats":   seats,
-                "title":   title,
-                "faculty": faculty,
-                "slot":    slot_name,
-                "time":    time.strftime("%H:%M:%S"),
-                "is_new":  False,
-            }
-
-            # For auto-scan: keep highest seat count per code
-            # For /check: keep all slot variants
-            if query:
-                key = f"{code}_{slot_name}"
-                data[key] = {**entry, "code": code}
-            else:
-                if code not in data or seats > data[code]["seats"]:
-                    data[code] = entry
-
-    return data
 
 
 # ── /check command ────────────────────────────────────────
