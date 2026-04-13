@@ -11,8 +11,10 @@ from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
+from selenium.webdriver.support.wait import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
 
 load_dotenv()
 
@@ -48,11 +50,6 @@ stats = {
     "alerts_date":    datetime.now().strftime("%Y-%m-%d"),
 }
 
-# Shared driver for /check reuse (None = not logged in)
-shared_driver_lock = threading.Lock()
-shared_driver      = None
-shared_slot_select = None
-
 
 # ── Stats helpers ─────────────────────────────────────────
 
@@ -86,6 +83,51 @@ def increment_alerts():
         stats["alerts_date"]  = today
     stats["alerts_today"] += 1
     save_stats()
+
+
+# ── Smart cell parser ─────────────────────────────────────
+# ARMS table columns (0-indexed):
+#   0 = S.No  1 = Course Code  2 = Course Title  3 = Faculty  4 = Available Seats  5 = ...
+# But sometimes cols shift. We detect robustly by scanning all cells.
+
+def parse_row(cells):
+    """
+    Returns (code, title, faculty, seats) from a table row's cells.
+    Uses regex to identify which cell is code and which is seats,
+    then infers title and faculty from surrounding cells.
+    """
+    ct = [c.text.strip() for c in cells]
+    if not any(ct):
+        return None, None, None, 0
+
+    code_idx  = None
+    seats_idx = None
+
+    for i, val in enumerate(ct):
+        # Course code: letters followed by digits, 6+ chars e.g. ECA1401, SPIC5A07
+        if re.match(r'^[A-Z]{2,}\d{2,}', val.upper()) and len(val) >= 5:
+            if code_idx is None:
+                code_idx = i
+        # Seats: pure small number (0-999)
+        if re.fullmatch(r'\d{1,3}', val):
+            seats_idx = i
+
+    if code_idx is None:
+        return None, None, None, 0
+
+    code  = ct[code_idx].split()[0].upper()   # take only first token in case of extra text
+    seats = int(ct[seats_idx]) if seats_idx is not None else 0
+
+    # Title is the cell right after code_idx (if it exists and isn't a number)
+    title  = ""
+    faculty = ""
+
+    if code_idx + 1 < len(ct) and not re.fullmatch(r'\d+', ct[code_idx + 1]):
+        title = ct[code_idx + 1]
+    if code_idx + 2 < len(ct) and not re.fullmatch(r'\d+', ct[code_idx + 2]):
+        faculty = ct[code_idx + 2]
+
+    return code, title, faculty, seats
 
 
 # ── Dashboard HTML ────────────────────────────────────────
@@ -244,200 +286,208 @@ def tg_get_updates(offset):
         return []
 
 
-# ── /check command: search all slots for given course code ─
+# ── Driver builder ────────────────────────────────────────
 
-def search_course(query_code, chat_id):
-    """Search all slots (except excluded) for courses matching the query code."""
-    query = query_code.strip().upper()
-    add_log(f"/check requested for: {query}")
-    tg_send(f"🔍 Searching all slots for: {query}\nPlease wait...", chat_id)
+def build_driver():
+    opts = Options()
+    opts.binary_location = "/usr/bin/google-chrome"
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1920,1080")
+    return webdriver.Chrome(options=opts)
 
+
+def login_driver(driver):
+    """Login and return True on success, False on failure."""
+    driver.get(LOGIN_URL)
     try:
-        opts = Options()
-        opts.binary_location = "/usr/bin/google-chrome"
-        opts.add_argument("--headless=new")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu")
-        opts.add_argument("--window-size=1920,1080")
-        driver = webdriver.Chrome(options=opts)
-    except Exception as e:
-        tg_send(f"❌ Failed to launch browser: {e}", chat_id)
-        return
-
-    results = []  # list of dicts
-
+        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "txtusername")))
+    except TimeoutException:
+        return False
+    driver.find_element(By.ID, "txtusername").send_keys(USERNAME)
+    driver.find_element(By.ID, "txtpassword").send_keys(PASSWORD)
+    driver.find_element(By.ID, "btnlogin").click()
     try:
-        driver.get(LOGIN_URL)
-        time.sleep(5)
+        WebDriverWait(driver, 15).until(EC.url_contains("Landing"))
+    except TimeoutException:
+        return False
+    return True
 
+
+def scan_all_slots(driver, query=None):
+    """
+    Scan all non-excluded slots.
+    If query is set (str), only collect rows matching that query (case-insensitive).
+    Returns dict: { code: {seats, title, faculty, slot, time} }
+    """
+    driver.get(ENROLL_URL)
+    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "cphbody_ddlslot")))
+
+    sel   = Select(driver.find_element(By.ID, "cphbody_ddlslot"))
+    slots = [o.get_attribute("value") for o in sel.options if o.get_attribute("value")]
+
+    data = {}
+
+    for slot in slots:
+        if slot.strip().upper() in EXCLUDED_SLOTS:
+            continue
+
+        sel.select_by_value(slot)
+
+        # Wait for table to refresh — wait for at least one <tr> with <td>s
         try:
-            uf = driver.find_element(By.ID, "txtusername")
-        except NoSuchElementException:
-            tg_send("❌ Login page not accessible.", chat_id)
-            return
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "tr td"))
+            )
+        except TimeoutException:
+            time.sleep(1)
 
-        uf.send_keys(USERNAME)
-        driver.find_element(By.ID, "txtpassword").send_keys(PASSWORD)
-        driver.find_element(By.ID, "btnlogin").click()
-        time.sleep(5)
+        slot_name = sel.first_selected_option.text.strip()
 
-        if "Login" in driver.current_url:
-            tg_send("❌ Login failed. Check credentials.", chat_id)
-            return
-
-        driver.get(ENROLL_URL)
-        time.sleep(5)
-
-        sel   = Select(driver.find_element(By.ID, "cphbody_ddlslot"))
-        slots = [o.get_attribute("value") for o in sel.options if o.get_attribute("value")]
-
-        for slot in slots:
-            if slot.strip().upper() in EXCLUDED_SLOTS:
+        for row in driver.find_elements(By.TAG_NAME, "tr"):
+            cells = row.find_elements(By.TAG_NAME, "td")
+            if len(cells) < 3:
                 continue
 
-            sel.select_by_value(slot)
-            time.sleep(3)
-            slot_name = sel.first_selected_option.text.strip()
+            text = row.text.strip()
+            if not text:
+                continue
 
-            for row in driver.find_elements(By.TAG_NAME, "tr"):
-                cells = row.find_elements(By.TAG_NAME, "td")
-                if len(cells) < 3:
-                    continue
-                text = row.text.strip()
-                if not text:
-                    continue
+            # If doing a targeted search, skip rows that don't match
+            if query and query.upper() not in text.upper():
+                continue
 
-                # Match if query is anywhere in the row text (case-insensitive)
-                if query not in text.upper():
-                    continue
+            code, title, faculty, seats = parse_row(cells)
+            if not code:
+                continue
 
-                # Extract course code from row
-                code = None
-                for part in text.split():
-                    if re.match(r"^[A-Z]{2,}\d{3,}", part.upper()):
-                        code = part.upper()
-                        break
-                if not code:
-                    continue
+            entry = {
+                "seats":   seats,
+                "title":   title,
+                "faculty": faculty,
+                "slot":    slot_name,
+                "time":    time.strftime("%H:%M:%S"),
+                "is_new":  False,
+            }
 
-                ct      = [c.text.strip() for c in cells]
-                title   = ct[2] if len(ct) > 2 else "N/A"
-                faculty = ct[3] if len(ct) > 3 else "N/A"
-                nums    = re.findall(r"\d+", text)
-                seats   = int(nums[-1]) if nums else 0
-
-                # Avoid duplicate slot+code combos
+            # For auto-scan: keep highest seat count per code
+            # For /check: keep all slot variants
+            if query:
                 key = f"{code}_{slot_name}"
-                if not any(r["key"] == key for r in results):
-                    results.append({
-                        "key":     key,
-                        "code":    code,
-                        "slot":    slot_name,
-                        "title":   title,
-                        "faculty": faculty,
-                        "seats":   seats,
-                    })
+                data[key] = {**entry, "code": code}
+            else:
+                if code not in data or seats > data[code]["seats"]:
+                    data[code] = entry
 
+    return data
+
+
+# ── /check command ────────────────────────────────────────
+
+def search_course(query_code, chat_id):
+    query = query_code.strip().upper()
+    add_log(f"/check: {query}")
+    tg_send(f"🔍 Searching for: {query}\nPlease wait...", chat_id)
+
+    driver = None
+    try:
+        driver = build_driver()
+        if not login_driver(driver):
+            tg_send("❌ Login failed during search.", chat_id)
+            return
+
+        results = scan_all_slots(driver, query=query)
+
+    except Exception as e:
+        tg_send(f"❌ Search error: {e}", chat_id)
+        return
     finally:
-        driver.quit()
+        if driver:
+            driver.quit()
 
-    # ── Build reply ──
     if not results:
         tg_send(
-            f"🔍 Search: {query}\n"
-            f"{'─'*30}\n"
-            f"❌ No courses found matching '{query}' in any slot.",
+            f"🔍 Search: {query}\n{'─'*30}\n"
+            f"❌ No courses found matching '{query}'.",
             chat_id
         )
         return
 
-    header = (
-        f"🔍 Search results for: {query}\n"
+    items   = list(results.values())
+    header  = (
+        f"🔍 Search: {query}\n"
         f"{'─'*30}\n"
-        f"📊 Found in {len(results)} slot(s)\n\n"
+        f"📊 Found in {len(items)} slot(s)\n\n"
     )
 
     lines = []
-    for r in results:
+    for r in items:
         avail = f"{r['seats']} seats" if r["seats"] > 0 else "Full 🔴"
         lines.append(
-            f"📍 {r['slot']}\n"
-            f"   📚 Code: {r['code']}\n"
-            f"   📖 {r['title']}\n"
-            f"   👩‍🏫 {r['faculty']}\n"
-            f"   🪑 {avail}"
+            f"📍 Slot: {r['slot']}\n"
+            f"📚 Code: {r['code']}\n"
+            f"📖 Title: {r['title'] or 'N/A'}\n"
+            f"👩‍🏫 Faculty: {r['faculty'] or 'N/A'}\n"
+            f"🪑 Vacancies: {avail}"
         )
 
-    # Telegram message limit ~4096 chars — split if needed
-    body    = "\n\n".join(lines)
-    full_msg = header + body
-
+    full_msg = header + "\n\n".join(lines)
     if len(full_msg) <= 4000:
         tg_send(full_msg, chat_id)
     else:
-        tg_send(header + f"Sending {len(results)} results in chunks...", chat_id)
+        tg_send(header + f"Sending {len(items)} results...", chat_id)
         for chunk in lines:
             tg_send(chunk, chat_id)
             time.sleep(0.3)
 
-    add_log(f"/check {query} → {len(results)} result(s) sent.")
+    add_log(f"/check {query} → {len(items)} result(s).")
 
 
 # ── Telegram command polling ──────────────────────────────
 
 def handle_status_command(chat_id):
     alive_str = "Yes ✅" if stats["session_alive"] else "No ❌"
-    msg = (
+    tg_send(
         f"Bot Status 🟢\n"
         f"{'─'*30}\n"
         f"🕒 Last check: {stats['last_check']}\n"
         f"🔑 Session alive: {alive_str}\n"
         f"⚠️ Login failures: {stats['login_failures']}\n"
         f"📬 Alerts today: {stats['alerts_today']}\n"
-        f"🖥️ Server time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        f"🖥️ Server time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        chat_id
     )
-    tg_send(msg, chat_id)
-
 
 def poll_telegram_commands():
     if not TG_TOKEN:
         return
     offset = 0
-    add_log("Telegram command polling started.")
+    add_log("Telegram polling started.")
     while True:
         try:
             updates = tg_get_updates(offset)
             for update in updates:
-                offset   = update["update_id"] + 1
-                msg      = update.get("message", {})
-                text     = msg.get("text", "").strip()
-                chat_id  = msg.get("chat", {}).get("id")
-
+                offset  = update["update_id"] + 1
+                msg     = update.get("message", {})
+                text    = msg.get("text", "").strip()
+                chat_id = msg.get("chat", {}).get("id")
                 if not text or not chat_id:
                     continue
-
                 lower = text.lower()
 
                 if lower.startswith("/status"):
-                    add_log("Received /status command.")
                     handle_status_command(chat_id)
 
                 elif lower.startswith("/check"):
-                    # /check CSA0712  or  /check ECA1718
                     parts = text.split(maxsplit=1)
                     if len(parts) < 2 or not parts[1].strip():
-                        tg_send(
-                            "⚠️ Usage: /check <course_code>\n"
-                            "Example: /check CSA0712",
-                            chat_id
-                        )
+                        tg_send("⚠️ Usage: /check <course_code>\nExample: /check CSA0712", chat_id)
                     else:
-                        query = parts[1].strip()
-                        # Run in separate thread so polling doesn't block
                         threading.Thread(
                             target=search_course,
-                            args=(query, chat_id),
+                            args=(parts[1].strip(), chat_id),
                             daemon=True
                         ).start()
 
@@ -445,17 +495,32 @@ def poll_telegram_commands():
                     tg_send(
                         "📖 Available Commands\n"
                         "─────────────────────\n"
-                        "/status — Bot health & stats\n"
-                        "/check <code> — Search all slots for a course code\n"
+                        "/status  — Bot health & stats\n"
+                        "/check <code> — Search all slots for a course\n"
                         "   Example: /check CSA0712\n"
                         "   Example: /check ECA17\n\n"
-                        "Auto-alerts fire when new courses are released.",
+                        "Auto-alerts fire only for newly released courses.",
                         chat_id
                     )
-
         except Exception as e:
             add_log(f"Poll error: {e}")
         time.sleep(2)
+
+
+# ── Self-ping ─────────────────────────────────────────────
+
+def self_ping():
+    app_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if not app_url:
+        add_log("RENDER_EXTERNAL_URL not set, self-ping disabled.")
+        return
+    add_log(f"Self-ping started → {app_url}")
+    while True:
+        try:
+            requests.get(app_url, timeout=10)
+        except Exception:
+            pass
+        time.sleep(45)
 
 
 # ── Enrollment Agent ──────────────────────────────────────
@@ -463,7 +528,8 @@ def poll_telegram_commands():
 class EnrollmentAgent:
 
     def __init__(self):
-        self.memory = self.load_memory()
+        self.memory     = self.load_memory()
+        self.first_run  = len(self.memory.get("seen_courses", {})) == 0
 
     def load_memory(self):
         if os.path.exists(DATA_FILE):
@@ -478,38 +544,11 @@ class EnrollmentAgent:
         with open(DATA_FILE, "w") as f:
             json.dump(self.memory, f, indent=2)
 
-    def build_driver(self):
-        opts = Options()
-        opts.binary_location = "/usr/bin/google-chrome"
-        opts.add_argument("--headless=new")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu")
-        opts.add_argument("--window-size=1920,1080")
-        return webdriver.Chrome(options=opts)
-
     def observe(self):
         add_log("Launching browser...")
-        driver = self.build_driver()
-        data   = {}
-
+        driver = build_driver()
         try:
-            driver.get(LOGIN_URL)
-            time.sleep(5)
-
-            try:
-                uf = driver.find_element(By.ID, "txtusername")
-            except NoSuchElementException:
-                stats["login_failures"] += 1
-                save_stats()
-                raise Exception("Login page not found.")
-
-            uf.send_keys(USERNAME)
-            driver.find_element(By.ID, "txtpassword").send_keys(PASSWORD)
-            driver.find_element(By.ID, "btnlogin").click()
-            time.sleep(5)
-
-            if "Login" in driver.current_url:
+            if not login_driver(driver):
                 stats["login_failures"] += 1
                 stats["session_alive"]   = False
                 save_stats()
@@ -518,62 +557,27 @@ class EnrollmentAgent:
             stats["session_alive"] = True
             add_log(f"Logged in. URL: {driver.current_url}")
 
-            driver.get(ENROLL_URL)
-            time.sleep(5)
-
-            sel   = Select(driver.find_element(By.ID, "cphbody_ddlslot"))
-            slots = [o.get_attribute("value") for o in sel.options if o.get_attribute("value")]
-            add_log(f"Found {len(slots)} slots.")
-
-            for slot in slots:
-                if slot.strip().upper() in EXCLUDED_SLOTS:
-                    continue
-
-                sel.select_by_value(slot)
-                time.sleep(3)
-                slot_name = sel.first_selected_option.text.strip()
-
-                for row in driver.find_elements(By.TAG_NAME, "tr"):
-                    cells = row.find_elements(By.TAG_NAME, "td")
-                    if len(cells) < 3:
-                        continue
-                    text = row.text.strip()
-                    if not text:
-                        continue
-
-                    code = None
-                    for part in text.split():
-                        if re.match(r"^[A-Z]{2,}\d{3,}", part):
-                            code = part
-                            break
-                    if not code:
-                        continue
-
-                    ct      = [c.text.strip() for c in cells]
-                    title   = ct[2] if len(ct) > 2 else ""
-                    faculty = ct[3] if len(ct) > 3 else ""
-                    nums    = re.findall(r"\d+", text)
-                    seats   = int(nums[-1]) if nums else 0
-
-                    entry = {
-                        "seats":   seats,
-                        "title":   title,
-                        "faculty": faculty,
-                        "slot":    slot_name,
-                        "time":    time.strftime("%H:%M:%S"),
-                        "is_new":  False,
-                    }
-                    if code not in data or seats > data[code]["seats"]:
-                        data[code] = entry
-
+            data = scan_all_slots(driver)
             add_log(f"Scan complete. {len(data)} courses found.")
             return data
-
         finally:
             driver.quit()
 
     def check_and_notify(self, current_data):
         seen = self.memory.get("seen_courses", {})
+
+        # ── First run: silently populate memory, no alerts ──
+        if self.first_run:
+            add_log(f"First run: seeding memory with {len(current_data)} courses. No alerts sent.")
+            self.memory["seen_courses"] = current_data
+            self.save_memory()
+            self.first_run = False
+            with state_lock:
+                dashboard_state["courses"]      = current_data
+                dashboard_state["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            stats["last_check"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")
+            save_stats()
+            return
 
         new_courses    = []
         opened_courses = []
@@ -587,11 +591,11 @@ class EnrollmentAgent:
                 if seen[code].get("seats", 0) == 0 and info["seats"] > 0:
                     opened_courses.append((code, info))
 
-        # New course alerts
+        # ── New course alerts ──
         slot_summary = {}
         for code, info in new_courses:
             slot = info.get("slot", "Unknown")
-            msg  = (
+            tg_send(
                 f"🆕 NEW COURSE DETECTED\n"
                 f"{'─'*30}\n"
                 f"📍 Slot: {slot}\n"
@@ -602,19 +606,17 @@ class EnrollmentAgent:
                 f"🕐 Time: {info.get('time','N/A')}"
             )
             add_log(f"NEW: {code} | {slot} | {info.get('title','')}")
-            tg_send(msg)
             increment_alerts()
             slot_summary[slot] = slot_summary.get(slot, 0) + 1
 
         if slot_summary:
             lines = "\n".join(f"{s}: {c}" for s, c in slot_summary.items())
-            total = sum(slot_summary.values())
-            tg_send(f"📊 Cycle summary: {total} new course(s)\n{lines}")
+            tg_send(f"📊 Cycle summary: {sum(slot_summary.values())} new course(s)\n{lines}")
 
-        # Seats opened alerts
+        # ── Seats opened alerts ──
         for code, info in opened_courses:
             slot = info.get("slot", "Unknown")
-            msg  = (
+            tg_send(
                 f"🟢 SEATS NOW AVAILABLE\n"
                 f"{'─'*30}\n"
                 f"📍 Slot: {slot}\n"
@@ -625,15 +627,13 @@ class EnrollmentAgent:
                 f"🕐 Time: {info.get('time','N/A')}"
             )
             add_log(f"Seats opened: {code} | {slot}")
-            tg_send(msg)
             increment_alerts()
 
         if not new_courses and not opened_courses:
-            add_log("No new courses or seat changes.")
+            add_log("No new courses or changes.")
 
         # Merge — never forget seen courses across restarts
-        merged = {**seen, **current_data}
-        self.memory["seen_courses"] = merged
+        self.memory["seen_courses"] = {**seen, **current_data}
         self.save_memory()
 
         stats["last_check"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")
@@ -648,27 +648,10 @@ class EnrollmentAgent:
         while True:
             try:
                 add_log("Starting scan...")
-                current_data = self.observe()
-                self.check_and_notify(current_data)
+                self.check_and_notify(self.observe())
             except Exception as e:
                 add_log(f"Error: {e}")
             time.sleep(300)
-
-
-# ── Self-ping to prevent Render free tier sleep ───────────
-
-def self_ping():
-    app_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-    if not app_url:
-        add_log("RENDER_EXTERNAL_URL not set, self-ping disabled.")
-        return
-    add_log(f"Self-ping started → {app_url}")
-    while True:
-        try:
-            requests.get(app_url, timeout=10)
-        except Exception:
-            pass
-        time.sleep(45)
 
 
 # ── Entry point ───────────────────────────────────────────
